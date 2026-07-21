@@ -20,11 +20,10 @@ app.add_middleware(
 )
 
 def escape_latex(text: str) -> str:
-    """Sanitize and escape special LaTeX characters in user input."""
+    """Sanitize and escape special LaTeX characters in plain text string."""
     if not isinstance(text, str):
         return text
     
-    # Avoid escaping already escaped LaTeX commands
     chars = {
         '&': r'\&',
         '%': r'\%',
@@ -33,9 +32,37 @@ def escape_latex(text: str) -> str:
         '_': r'\_',
     }
     
-    # Pattern matches unescaped &, %, $, #, _
     pattern = re.compile(r'(?<!\\)([&%$#_])')
     return pattern.sub(lambda m: chars.get(m.group(1), m.group(1)), text)
+
+
+def sanitize_generated_tex(tex: str) -> str:
+    """Clean up markdown code blocks, duplicate package includes, and conflicting fontawesome definitions."""
+    if not isinstance(tex, str):
+        return ""
+    
+    # 1. Clean markdown code wraps if present
+    tex = re.sub(r"^```(?:latex|tex)?\n", "", tex.strip(), flags=re.MULTILINE)
+    tex = re.sub(r"\n```$", "", tex.strip(), flags=re.MULTILINE)
+    tex = tex.strip()
+
+    # 2. Fix conflicting FontAwesome packages (which cause "Command \FA already defined" error)
+    if r"\usepackage{fontawesome}" in tex and r"\usepackage{fontawesome5}" in tex:
+        tex = tex.replace(r"\usepackage{fontawesome}", "% \\usepackage{fontawesome} (removed duplicate)")
+
+    # 3. Deduplicate exact duplicate \usepackage{fontawesome} or \usepackage{fontawesome5} lines
+    lines = tex.split('\n')
+    seen_packages = set()
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(r"\usepackage{fontawesome") or stripped.startswith(r"\usepackage{fontawesome5"):
+            if stripped in seen_packages:
+                continue
+            seen_packages.add(stripped)
+        cleaned_lines.append(line)
+
+    return '\n'.join(cleaned_lines)
 
 
 class EducationEntry(BaseModel):
@@ -103,24 +130,32 @@ async def generate_cv(req: GenerateCvRequest):
         template_tex = req.latex_template
         target_pages = req.target_pages or 1
 
+        # Sanitize plain text user input fields
+        user_name = escape_latex(user.name or "")
+        user_email = escape_latex(user.email or "")
+        user_phone = escape_latex(user.phone or "")
+        user_location = escape_latex(user.location or "")
+        user_linkedin = escape_latex(user.linkedin or "")
+        user_github = escape_latex(user.github or "")
+        user_summary = escape_latex(user.summary or "")
+
         # Check if work experience was provided
         has_experience = bool(user.experience and len([e for e in user.experience if e.company or e.role]) > 0)
 
-        # Build repository context blocks (handling missing READMEs via manifests + trees + commits)
+        # Build repository context blocks
         repo_facts = []
         for r in repos:
-            name = r.name or r.fullName
-            desc = r.description or "No description provided."
-            lang = r.language or "Unknown"
-            topics = ", ".join(r.topics) if r.topics else "None"
+            name = escape_latex(r.name or r.fullName)
+            desc = escape_latex(r.description or "No description provided.")
+            lang = escape_latex(r.language or "Unknown")
+            topics = escape_latex(", ".join(r.topics)) if r.topics else "None"
             
             fact_block = f"### Repository: {name}\n- URL: {r.url}\n- Primary Language: {lang}\n- Topics: {topics}\n- Description: {desc}\n"
             
             if r.userNotes:
-                fact_block += f"- User Performance Notes: {r.userNotes}\n"
+                fact_block += f"- User Performance Notes: {escape_latex(r.userNotes)}\n"
             
             if r.readmeContent:
-                # Use README snippet
                 snippet = r.readmeContent[:2000]
                 fact_block += f"- README Excerpt:\n```\n{snippet}\n```\n"
             else:
@@ -142,16 +177,15 @@ async def generate_cv(req: GenerateCvRequest):
 
         repo_context_str = "\n".join(repo_facts) if repo_facts else "No GitHub repositories selected."
 
-        # Serialize User Details
         user_info_str = f"""
-Name: {user.name}
-Email: {user.email}
-Phone: {user.phone}
-Location: {user.location}
-LinkedIn: {user.linkedin}
-GitHub: {user.github}
+Name: {user_name}
+Email: {user_email}
+Phone: {user_phone}
+Location: {user_location}
+LinkedIn: {user_linkedin}
+GitHub: {user_github}
 Portfolio: {user.portfolio}
-Summary / Bio: {user.summary}
+Summary / Bio: {user_summary}
 
 Education:
 {json.dumps([e.dict() for e in user.education], indent=2) if user.education else "None provided."}
@@ -183,9 +217,9 @@ CRITICAL RULES & STRICT CONSTRAINTS:
    - IF Work Experience is FALSE (no experience provided): You MUST COMPLETELY REMOVE / OMIT the "Experience" or "Work Experience" section heading and its entire block from the LaTeX template. Do NOT leave an empty section header or empty itemize environments.
    - IF Work Experience is TRUE: Populate the Experience section cleanly with the provided experience entries.
 
-4. **LATEX COMPILATION SAFETY**:
+4. **LATEX COMPILATION SAFETY & PACKAGE CONFLICTS**:
    - Return valid, raw compilable LaTeX code ONLY.
-   - Ensure all LaTeX special characters in user text (% -> \\%, $ -> \\$, & -> \\&, # -> \\#, _ -> \\_) are properly escaped.
+   - DO NOT add duplicate \\usepackage{{fontawesome}} or \\usepackage{{fontawesome5}} if they already exist in the template.
    - Retain documentclass, packages, custom commands, and environment definitions from the template.
    - DO NOT surround your response in markdown code blocks like ```latex or ```. Return ONLY the raw LaTeX string starting with \\documentclass or comments.
 """
@@ -230,12 +264,8 @@ Inject the candidate's details and generated project bullets into the LaTeX temp
             print("[LLM_BRAIN] No LLM API response available — executing fallback template string replacement.")
             edited_tex = fallback_latex_filler(template_tex, user, repos, has_experience)
 
-        # Clean markdown code wraps if model added them
-        edited_tex = re.sub(r"^```(?:latex|tex)?\n", "", edited_tex.strip(), flags=re.MULTILINE)
-        edited_tex = re.sub(r"\n```$", "", edited_tex.strip(), flags=re.MULTILINE)
-
-        # Extra safety pass for character escaping
-        edited_tex = escape_latex(edited_tex)
+        # Sanitize and post-process generated LaTeX code
+        edited_tex = sanitize_generated_tex(edited_tex)
 
         return {"ok": True, "tex": edited_tex, "summary": "Resume generated successfully with zero hallucination context."}
 
