@@ -50,7 +50,7 @@ def _build_repo_context(repos: List[RepoDetail]) -> str:
             fact_block += f"- User Performance Notes: {_escape_latex(r.userNotes)}\n"
 
         if r.readmeContent:
-            snippet = r.readmeContent[:2000]
+            snippet = r.readmeContent[:800]
             fact_block += f"- README Excerpt:\n```\n{snippet}\n```\n"
         else:
             fact_block += "- README: NONE (NO README FILE IN REPO)\n"
@@ -135,15 +135,51 @@ def build_user_prompt(
     user_info_str, has_experience, has_education = _build_user_info(user)
     repo_context_str = _build_repo_context(repos)
 
-    user_prompt = f"""CANDIDATE DATA:
+    mapping_instructions = f"""REQUIRED SUBSTITUTIONS:
+- Replace the name placeholder (e.g., "Jake Ryan", "Sourabh Bajaj", etc.) with the user's name: "{user.name}"
+- Replace the contact info placeholders (phone, email, linkedin, github, portfolio) with the user's info:
+    - Email: "{user.email}"
+    - Phone: "{user.phone}"
+    - Location: "{user.location}"
+    - LinkedIn: "{user.linkedin}"
+    - GitHub: "{user.github}"
+    - Portfolio: "{user.portfolio}"
+- Replace ALL education entries with the user's actual education entries listed under CANDIDATE DATA.
+- Replace ALL work experience/employment entries with the user's actual work experience listed under CANDIDATE DATA.
+- Replace ALL project/repository entries with the user's actual projects listed under GITHUB REPOSITORIES.
+- Replace ALL skills/languages/frameworks with the user's actual skills listed under CANDIDATE DATA.
+"""
+
+    user_prompt = f"""CRITICAL INSTRUCTION:
+The template below contains SAMPLE DATA (e.g. "Jake Ryan", "Southwestern University", "Gitlytics", etc.).
+You MUST replace ALL sample data with the real CANDIDATE DATA provided below.
+Do NOT output the sample data or placeholders in the final document.
+
+{mapping_instructions}
+
+=========================================
+CANDIDATE DATA:
+=========================================
 {user_info_str}
 
+=========================================
 GITHUB REPOSITORIES:
+=========================================
 {repo_context_str}
 
-TEMPLATE TO FILL (preserve structure exactly, only replace data):
+=========================================
+TEMPLATE TO FILL (Replace ALL sample data, preserve structure):
+=========================================
 {template_tex}
 
-Fill in the template with the candidate's data now. Return the COMPLETE LaTeX document from \\documentclass to \\end{{document}}. Do NOT truncate or cut off the output."""
+=========================================
+INSTRUCTIONS FOR FINAL OUTPUT:
+=========================================
+Fill in the template with the candidate's data now.
+- Every single section must contain real candidate data.
+- Replace every placeholder name, institution, job title, project name, bullet point, and tech skill.
+- Return the COMPLETE LaTeX document from \\documentclass to \\end{{document}}.
+- Do NOT truncate or cut off the output. Do NOT include markdown code fences (```) or conversational response text.
+"""
 
     return user_prompt, has_experience, has_education

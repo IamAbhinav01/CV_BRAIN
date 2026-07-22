@@ -136,6 +136,18 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
     return ""
 
 
+def strip_latex_comments(tex: str) -> str:
+    """Remove comments from LaTeX code to save tokens."""
+    import re
+    lines = tex.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        # Regex to match '%' not preceded by a backslash '\'
+        cleaned = re.sub(r'(?<!\\)%.*$', '', line).rstrip()
+        cleaned_lines.append(cleaned)
+    return '\n'.join(cleaned_lines)
+
+
 # ── Core Orchestrator ─────────────────────────────────────────────────────────
 
 async def generate_cv(
@@ -168,8 +180,9 @@ async def generate_cv(
     engine = template_meta["engine"] if template_meta else "pdflatex"
 
     # ── Step 3: Build prompts ─────────────────────────────────────────────
+    clean_template_tex = strip_latex_comments(template_tex)
     user_prompt, has_experience, has_education = build_user_prompt(
-        user_profile, selected_repos, template_tex
+        user_profile, selected_repos, clean_template_tex
     )
     system_prompt = build_system_prompt(
         template_id=template_id,
@@ -188,6 +201,9 @@ async def generate_cv(
     edited_tex = call_llm(system_prompt, user_prompt)
 
     # ── Step 5: Validate output ───────────────────────────────────────────
+    validation_passed = True
+    validation_failures = []
+
     if _has_valid_tex(edited_tex):
         validation = validate_output(
             edited_tex, user_profile, has_experience, has_education
@@ -212,18 +228,29 @@ async def generate_cv(
                 retry_validation = validate_output(
                     retry_tex, user_profile, has_experience, has_education
                 )
-                # Use retry result if it's better (more checks passed)
-                if retry_validation.passed or len(retry_validation.failures) < len(validation.failures):
+                if retry_validation.passed:
                     edited_tex = retry_tex
-                    print("[LLM_BRAIN] Retry produced better result, using it.")
+                    validation_passed = True
                 else:
-                    print("[LLM_BRAIN] Retry did not improve, keeping original.")
+                    validation_passed = False
+                    validation_failures = retry_validation.failures
+                    # Keep retry if it's better
+                    if len(retry_validation.failures) < len(validation.failures):
+                        edited_tex = retry_tex
+            else:
+                validation_passed = False
+                validation_failures = validation.failures
+        else:
+            validation_passed = True
+    else:
+        validation_passed = False
+        validation_failures = ["no_valid_latex_structure_received_from_llm"]
 
-    # ── Step 6: Fallback if LLM failed entirely ──────────────────────────
-    if not _has_valid_tex(edited_tex):
-        print("[LLM_BRAIN] No valid LLM response — executing fallback template string replacement.")
-        edited_tex = fallback_latex_filler(
-            template_tex, user_profile, selected_repos, has_experience, has_education
+    # Raise error if validation failed so fallback does not silently return placeholders
+    if not validation_passed:
+        raise ValueError(
+            f"Resume validation failed: {', '.join(validation_failures)}. "
+            "Please ensure your LLM API keys are valid and not rate-limited (TPD/TPM limits)."
         )
 
     # ── Step 7: Sanitize ──────────────────────────────────────────────────

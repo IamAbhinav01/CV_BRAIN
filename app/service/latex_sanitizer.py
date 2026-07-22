@@ -25,6 +25,64 @@ def escape_latex(text: str) -> str:
     return pattern.sub(lambda m: chars.get(m.group(1), m.group(1)), text)
 
 
+def fix_href_extra_braces(line: str) -> str:
+    """
+    Finds \\href{...}{...} in a line and checks if there's an extra trailing '}'.
+    It correctly handles nested braces inside the arguments (like \\underline{...}).
+    """
+    if r'\href{' not in line:
+        return line
+
+    idx = 0
+    while True:
+        idx = line.find(r'\href{', idx)
+        if idx == -1:
+            break
+        
+        # We found \href{. Let's find the end of the first argument.
+        # Start scanning after '\href{' (which is length 6)
+        first_arg_start = idx + 6
+        depth = 1
+        i = first_arg_start
+        while i < len(line) and depth > 0:
+            if line[i] == '{':
+                depth += 1
+            elif line[i] == '}':
+                depth -= 1
+            i += 1
+            
+        if depth > 0 or i >= len(line) or line[i] != '{':
+            # Could not find the second argument start '{', or scanning failed.
+            idx += 6
+            continue
+            
+        # Found '{' for the second argument. Let's find its closing brace.
+        second_arg_start = i + 1
+        depth = 1
+        i = second_arg_start
+        while i < len(line) and depth > 0:
+            if line[i] == '{':
+                depth += 1
+            elif line[i] == '}':
+                depth -= 1
+            i += 1
+            
+        if depth > 0:
+            idx += 6
+            continue
+            
+        # We are now right after the second argument's closing brace.
+        # Check if the next character is '}'.
+        if i < len(line) and line[i] == '}':
+            # This is an extra closing brace! Remove it.
+            line = line[:i] + line[i+1:]
+            idx = i
+        else:
+            idx = i
+            
+    return line
+
+
 def sanitize_generated_tex(tex: str) -> str:
     """Clean up markdown code blocks, duplicate package includes, empty list
     environments, trailing linebreaks, and unescaped underscores/ampersands."""
@@ -37,11 +95,14 @@ def sanitize_generated_tex(tex: str) -> str:
     tex = tex.strip()
 
     # 1b. Strip any natural language text before the actual LaTeX content
-    for marker in [r'\documentclass', '%']:
-        idx = tex.find(marker)
-        if idx > 0:
-            tex = tex[idx:]
-            break
+    doc_class_idx = tex.find(r'\documentclass')
+    if doc_class_idx >= 0:
+        tex = tex[doc_class_idx:]
+    else:
+        # Fall back to comment symbol only if near the beginning of the response
+        comment_idx = tex.find('%')
+        if 0 <= comment_idx < 500:
+            tex = tex[comment_idx:]
     tex = tex.strip()
 
     # 2. Fix conflicting FontAwesome packages
@@ -81,7 +142,10 @@ def sanitize_generated_tex(tex: str) -> str:
     past_begin_doc = False
 
     for line in lines:
+        # Apply brace balancing for href
+        line = fix_href_extra_braces(line)
         stripped = line.strip()
+
 
         if r'\begin{document}' in stripped:
             past_begin_doc = True
@@ -132,7 +196,7 @@ def sanitize_generated_tex(tex: str) -> str:
     )
     res_tex = re.sub(r"\\resumeItemListStart\s*\\resumeItemListEnd", "", res_tex)
     res_tex = re.sub(
-        r"\\begin\{itemize\}[^]]*\]?\s*\\end\{itemize\}", "", res_tex
+        r"\\begin\{itemize\}(?:\[[^\]]*\])?\s*\\end\{itemize\}", "", res_tex
     )
 
     # 6. Remove empty skill lines like \textbf{Databases}{: } \\
@@ -196,8 +260,25 @@ def fallback_latex_filler(
     name = escape_latex(user.name or "Candidate Name")
     email = escape_latex(user.email or "user@example.com")
 
-    # Basic header replacements
+    # Direct replacements for known template placeholders
+    placeholders_name = ["Jake Ryan", "Sourabh Bajaj", "Danny Phang", "Zachary Deedy", "Claud D. Park", "John Doe", "First Last", "Candidate Name"]
+    for p_name in placeholders_name:
+        result = result.replace(p_name, name)
+
+    placeholders_email = ["jake@su.edu", "sourabh@sourabhbajaj.com", "email@example.com", "x@x.com", "user@example.com"]
+    for p_email in placeholders_email:
+        result = result.replace(p_email, email)
+
+    # Command-based replacements for standard resume macros (extremely robust fallback)
     result = re.sub(r"(\\name\{)[^}]*(})", rf"\1{name}\2", result)
+    result = re.sub(r"(\\email\{)[^}]*(})", rf"\1{email}\2", result)
+    result = re.sub(r"(\\phone(?:\[[^\]]*\])?\{)[^}]*(})", rf"\1{escape_latex(user.phone or '')}\2", result)
+    result = re.sub(r"(\\linkedin\{)[^}]*(})", rf"\1{escape_latex(user.linkedin or '')}\2", result)
+    result = re.sub(r"(\\github\{)[^}]*(})", rf"\1{escape_latex(user.github or '')}\2", result)
+    result = re.sub(r"(\\location\{)[^}]*(})", rf"\1{escape_latex(user.location or '')}\2", result)
+    result = re.sub(r"(\\homepage\{)[^}]*(})", rf"\1{escape_latex(user.portfolio or '')}\2", result)
+
+    # Basic header replacements (backup regex for href mailto)
     result = re.sub(
         r"(\\href\{mailto:[^}]*\}\{)[^}]*(})", rf"\1{email}\2", result
     )

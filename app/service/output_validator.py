@@ -4,6 +4,7 @@ Ensures the resume is not half-cooked: all sections present, full page,
 document properly terminated, user data actually injected.
 """
 
+import json
 import re
 from app.models import UserProfile, ValidationResult
 
@@ -98,6 +99,20 @@ def validate_output(
         checks["has_user_name"] = any(part in tex.lower() for part in name_parts if len(part) > 1)
     else:
         checks["has_user_name"] = True  # no name to check
+
+    # Check for placeholder leak (template echo instead of substitution)
+    checks["no_placeholder_leak"] = True
+    user_profile_str = json.dumps(user_profile.dict()).lower()
+    known_placeholders = [
+        "jake ryan", "sourabh bajaj", "southwestern university", "blinn college",
+        "gitlytics", "simple paintball", "texas a&m university", "texas a\\&m university",
+        "zachary deedy", "claud d. park", "danny phang", "john doe"
+    ]
+    for placeholder in known_placeholders:
+        if placeholder in tex.lower() and placeholder not in user_profile_str:
+            checks["no_placeholder_leak"] = False
+            print(f"[LLM_BRAIN] Validation failed: Found placeholder '{placeholder}' in generated LaTeX, which was not in user profile.")
+            break
 
     # ── Section presence checks ───────────────────────────────────────────
     if has_education:

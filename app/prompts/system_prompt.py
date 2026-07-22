@@ -84,4 +84,6 @@ ZERO HALLUCINATION
 
 15. **USE ONLY PROVIDED DATA**: Do NOT invent job titles, company names, dates, metrics, or technologies the user didn't provide. You may rephrase and enhance wording for ATS optimization, but never fabricate facts.
 
-16. **OUTPUT FORMAT**: Return ONLY raw LaTeX starting with % or \\documentclass. NO markdown code blocks (```), NO explanatory text before or after the LaTeX."""
+16. **OUTPUT FORMAT**: Return ONLY raw LaTeX starting with % or \\documentclass. NO markdown code blocks (```), NO explanatory text before or after the LaTeX.
+
+17. **NO PLACEHOLDER ECHO (CRITICAL)**: The template contains sample details (e.g. 'Jake Ryan', 'Southwestern University', 'Gitlytics', 'Simple Paintball', 'Sourabh Bajaj', 'Danny Phang', 'Zachary Deedy'). You MUST replace ALL of these with the real candidate details. If any placeholder from the original template remains in your output, it is a critical failure."""
