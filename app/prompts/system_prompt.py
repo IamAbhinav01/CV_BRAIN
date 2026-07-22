@@ -47,6 +47,7 @@ ABSOLUTE STRUCTURAL RULES
    - Education Provided = {has_education}. If FALSE, DELETE the entire Education section.
    - If user provided a Summary/Bio AND the template supports it, include a Summary section.
    - If user provided Certifications, add them in a relevant section.
+   - If user provided Achievements/Honors, add them in a relevant section (use the template's Honors/Awards section if it has one; otherwise fold them into Achievements or a Certifications-and-Achievements block). Do not invent an achievement's wording — use what was provided, only rephrasing for ATS tone.
 
 6. **HYPERLINKS**: For project GitHub links, use \\href{{URL}}{{\\underline{{GitHub}}}} where URL contains raw underscores (NOT \\_ or %5F). hyperref handles underscores in URLs natively.
 

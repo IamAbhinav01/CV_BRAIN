@@ -108,8 +108,11 @@ Education Provided: {has_education}
 Education:
 {json.dumps([e.dict() for e in user.education], indent=2) if user.education else "NONE (User provided no education)."}
 
-Certifications & Achievements:
+Certifications:
 {json.dumps(user.certifications, indent=2) if user.certifications else "None provided."}
+
+Achievements & Honors:
+{json.dumps([a.dict() for a in user.achievements], indent=2) if user.achievements else "None provided."}
 
 Work Experience Provided: {has_experience}
 Experience Entries:
@@ -148,6 +151,7 @@ def build_user_prompt(
 - Replace ALL work experience/employment entries with the user's actual work experience listed under CANDIDATE DATA.
 - Replace ALL project/repository entries with the user's actual projects listed under GITHUB REPOSITORIES.
 - Replace ALL skills/languages/frameworks with the user's actual skills listed under CANDIDATE DATA.
+- If the template has (or can accommodate) an Achievements/Honors/Awards section and the user provided any, include them — do not drop them silently.
 """
 
     user_prompt = f"""CRITICAL INSTRUCTION:

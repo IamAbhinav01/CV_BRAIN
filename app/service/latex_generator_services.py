@@ -88,19 +88,24 @@ def _call_groq(system_prompt: str, user_prompt: str) -> str:
 
 
 def _call_openai(system_prompt: str, user_prompt: str) -> str:
-    """Call OpenAI LLM as fallback. Returns raw response text or empty string."""
+    """Call OpenAI LLM. Returns raw response text or empty string on failure."""
     openai_api_key = config.get("OPENAI_API_KEY")
     if not openai_api_key:
         print("[LLM_BRAIN] No OPENAI_API_KEY configured, skipping OpenAI.")
         return ""
 
     try:
-        from langchain_community.chat_models import ChatOpenAI
+        # NOTE: was importing from langchain_community.chat_models, which is both the
+        # deprecated location and a package not listed in pyproject.toml — this call
+        # would have raised ImportError the first time it actually ran. Fixed to the
+        # current package (added to pyproject.toml as a new dependency).
+        from langchain_openai import ChatOpenAI
 
         llm = ChatOpenAI(
-            model_name="gpt-4o-mini",
-            openai_api_key=openai_api_key,
+            model="gpt-4o-mini",
+            api_key=openai_api_key,
             temperature=0.2,
+            max_tokens=int(config.get("GROQ_MAX_TOKENS", "8192")),
         )
         print("[LLM_BRAIN] Calling OpenAI (gpt-4o-mini)...")
         res = llm.invoke([
@@ -120,16 +125,18 @@ def _has_valid_tex(text: str) -> bool:
 
 def call_llm(system_prompt: str, user_prompt: str) -> str:
     """
-    Call LLM with Groq → OpenAI fallback chain.
+    Call LLM with OpenAI -> Groq fallback chain.
+    (Was Groq-first; switched per Ayush's request to run on OpenAI for now.
+    Groq stays as a fallback in case OPENAI_API_KEY is unset/rate-limited.)
     Returns the raw LLM response text.
     """
-    # Try Groq first
-    result = _call_groq(system_prompt, user_prompt)
+    # Try OpenAI first
+    result = _call_openai(system_prompt, user_prompt)
     if _has_valid_tex(result):
         return result
 
-    # Fallback to OpenAI
-    result = _call_openai(system_prompt, user_prompt)
+    # Fallback to Groq
+    result = _call_groq(system_prompt, user_prompt)
     if _has_valid_tex(result):
         return result
 

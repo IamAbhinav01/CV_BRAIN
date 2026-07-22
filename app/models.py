@@ -24,6 +24,12 @@ class ExperienceEntry(BaseModel):
     bullets: Optional[Any] = ""
 
 
+class AchievementEntry(BaseModel):
+    title: Optional[str] = ""
+    description: Optional[str] = ""
+    date: Optional[str] = ""
+
+
 class UserProfile(BaseModel):
     name: Optional[str] = ""
     email: Optional[str] = ""
@@ -35,6 +41,7 @@ class UserProfile(BaseModel):
     summary: Optional[str] = ""
     education: Optional[List[EducationEntry]] = []
     experience: Optional[List[ExperienceEntry]] = []
+    achievements: Optional[List[AchievementEntry]] = []
     skills: Optional[Dict[str, Any]] = {}
     certifications: Optional[List[Any]] = []
 
