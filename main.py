@@ -37,7 +37,7 @@ def escape_latex(text: str) -> str:
 
 
 def sanitize_generated_tex(tex: str) -> str:
-    """Clean up markdown code blocks, duplicate package includes, and conflicting fontawesome definitions."""
+    """Clean up markdown code blocks, duplicate package includes, empty list environments, trailing linebreaks, and unescaped underscores/ampersands."""
     if not isinstance(tex, str):
         return ""
     
@@ -46,23 +46,116 @@ def sanitize_generated_tex(tex: str) -> str:
     tex = re.sub(r"\n```$", "", tex.strip(), flags=re.MULTILINE)
     tex = tex.strip()
 
-    # 2. Fix conflicting FontAwesome packages (which cause "Command \FA already defined" error)
+    # 1b. Strip any natural language text before the actual LaTeX content
+    #     LLMs often prepend "Here's the completed document:" etc.
+    for marker in [r'\documentclass', '%']:
+        idx = tex.find(marker)
+        if idx > 0:
+            tex = tex[idx:]
+            break
+    tex = tex.strip()
+
+    # 2. Fix conflicting FontAwesome packages
     if r"\usepackage{fontawesome}" in tex and r"\usepackage{fontawesome5}" in tex:
         tex = tex.replace(r"\usepackage{fontawesome}", "% \\usepackage{fontawesome} (removed duplicate)")
 
-    # 3. Deduplicate exact duplicate \usepackage{fontawesome} or \usepackage{fontawesome5} lines
+    # 3. Fix underscores in \href{URL}{LABEL} URLs using string parsing (NOT regex).
+    #    hyperref's \href{} handles raw _ in URLs natively.
+    #    We must NOT use %5F (% is a TeX comment char!) or \_ (undefined in URL context).
+    #    Just ensure URLs contain plain _ (strip any \_ the LLM may have added).
+    def fix_href_urls(text):
+        result = []
+        i = 0
+        marker = '\\href{'
+        while i < len(text):
+            pos = text.find(marker, i)
+            if pos == -1:
+                result.append(text[i:])
+                break
+            result.append(text[i:pos])
+            j = pos + len(marker)
+            url_start = j
+            while j < len(text) and text[j] != '}':
+                j += 1
+            url = text[url_start:j]
+            # Strip \_ back to raw _ — hyperref handles _ in URLs natively
+            url_fixed = url.replace('\\_', '_')
+            result.append(marker + url_fixed)
+            i = j
+        return ''.join(result)
+
+    tex = fix_href_urls(tex)
+
+    # 4. Process line by line for character escaping & deduplication
     lines = tex.split('\n')
     seen_packages = set()
     cleaned_lines = []
+    past_begin_doc = False
+    
     for line in lines:
         stripped = line.strip()
+        
+        if r'\begin{document}' in stripped:
+            past_begin_doc = True
+
+        # Deduplicate packages
         if stripped.startswith(r"\usepackage{fontawesome") or stripped.startswith(r"\usepackage{fontawesome5"):
             if stripped in seen_packages:
                 continue
             seen_packages.add(stripped)
+        
+        # Only escape underscores/ampersands in document body text lines,
+        # NEVER in the preamble or lines with TeX commands/hrefs
+        if past_begin_doc and stripped and not stripped.startswith("%"):
+            has_tex_cmd = any(stripped.startswith(c) for c in [
+                r'\begin', r'\end', r'\documentclass', r'\usepackage', r'\input',
+                r'\newcommand', r'\renewcommand', r'\pagestyle', r'\fancyhf',
+                r'\addtolength', r'\setlength', r'\titleformat', r'\urlstyle',
+                r'\raggedbottom', r'\raggedright', r'\pdfgentounicode',
+                r'\section', r'\resumeSubHeadingListStart', r'\resumeSubHeadingListEnd',
+                r'\resumeItemListStart', r'\resumeItemListEnd',
+                r'\resumeSubheading', r'\resumeProjectHeading', r'\resumeItem',
+                r'\resumeSubItem', r'\resumeSubSubheading',
+            ])
+            if not has_tex_cmd and r'\href{' not in line:
+                line = re.sub(r'(?<!\\)_', r'\_', line)
+                line = re.sub(r'(?<!\\)&', r'\&', line)
+
         cleaned_lines.append(line)
 
-    return '\n'.join(cleaned_lines)
+    res_tex = '\n'.join(cleaned_lines)
+
+    # 5. Remove empty list environments
+    res_tex = re.sub(r"\\resumeSubHeadingListStart\s*\\resumeSubHeadingListEnd", "", res_tex)
+    res_tex = re.sub(r"\\resumeItemListStart\s*\\resumeItemListEnd", "", res_tex)
+    res_tex = re.sub(r"\\begin\{itemize\}[^]]*\]?\s*\\end\{itemize\}", "", res_tex)
+    
+    # 6. Remove empty skill lines like \textbf{Databases}{: } \\
+    res_tex = re.sub(r"\\textbf\{[^}]+\}\{:\s*\}\s*(\\\\)?", "", res_tex)
+
+    # 7. Remove trailing \\ before closing braces or \end{itemize}
+    res_tex = re.sub(r"\\\\\s*(\}\s*\\end\{itemize\})", r"\1", res_tex)
+    res_tex = re.sub(r"\\\\\s*(\}\s*\})", r"\1", res_tex)
+
+    # 8. Remove empty sections with no items
+    res_tex = re.sub(r"\\section\{[^}]+\}\s*(?=\\section|\n\\end\{document\})", "", res_tex)
+
+    # 9. Fix \resumeSubheading with wrong number of arguments (must have exactly 4 {} groups)
+    def fix_subheading_args(match):
+        full = match.group(0)
+        # Count existing {} argument groups after \resumeSubheading
+        args = re.findall(r'\{[^{}]*\}', full)
+        while len(args) < 4:
+            args.append('{}')
+        return '\\resumeSubheading\n      ' + ''.join(args)
+    
+    res_tex = re.sub(
+        r'\\resumeSubheading\s*(?:\{[^{}]*\}\s*){1,4}',
+        fix_subheading_args,
+        res_tex
+    )
+
+    return res_tex
 
 
 class EducationEntry(BaseModel):
@@ -77,7 +170,7 @@ class ExperienceEntry(BaseModel):
     role: Optional[str] = ""
     location: Optional[str] = ""
     dates: Optional[str] = ""
-    bullets: Optional[Any] = ""  # string or list
+    bullets: Optional[Any] = ""
 
 class UserProfile(BaseModel):
     name: Optional[str] = ""
@@ -91,6 +184,7 @@ class UserProfile(BaseModel):
     education: Optional[List[EducationEntry]] = []
     experience: Optional[List[ExperienceEntry]] = []
     skills: Optional[Dict[str, Any]] = {}
+    certifications: Optional[List[Any]] = []
 
 class RepoDetail(BaseModel):
     id: Optional[Any] = None
@@ -130,7 +224,6 @@ async def generate_cv(req: GenerateCvRequest):
         template_tex = req.latex_template
         target_pages = req.target_pages or 1
 
-        # Sanitize plain text user input fields
         user_name = escape_latex(user.name or "")
         user_email = escape_latex(user.email or "")
         user_phone = escape_latex(user.phone or "")
@@ -139,8 +232,8 @@ async def generate_cv(req: GenerateCvRequest):
         user_github = escape_latex(user.github or "")
         user_summary = escape_latex(user.summary or "")
 
-        # Check if work experience was provided
         has_experience = bool(user.experience and len([e for e in user.experience if e.company or e.role]) > 0)
+        has_education = bool(user.education and len([e for e in user.education if e.institution or e.degree]) > 0)
 
         # Build repository context blocks
         repo_facts = []
@@ -150,7 +243,9 @@ async def generate_cv(req: GenerateCvRequest):
             lang = escape_latex(r.language or "Unknown")
             topics = escape_latex(", ".join(r.topics)) if r.topics else "None"
             
-            fact_block = f"### Repository: {name}\n- URL: {r.url}\n- Primary Language: {lang}\n- Topics: {topics}\n- Description: {desc}\n"
+            clean_url = r.url or ""
+            
+            fact_block = f"### Repository: {name}\n- URL: {clean_url}\n- Primary Language: {lang}\n- Topics: {topics}\n- Description: {desc}\n"
             
             if r.userNotes:
                 fact_block += f"- User Performance Notes: {escape_latex(r.userNotes)}\n"
@@ -187,8 +282,12 @@ GitHub: {user_github}
 Portfolio: {user.portfolio}
 Summary / Bio: {user_summary}
 
+Education Provided: {has_education}
 Education:
-{json.dumps([e.dict() for e in user.education], indent=2) if user.education else "None provided."}
+{json.dumps([e.dict() for e in user.education], indent=2) if user.education else "NONE (User provided no education)."}
+
+Certifications & Achievements:
+{json.dumps(user.certifications, indent=2) if user.certifications else "None provided."}
 
 Work Experience Provided: {has_experience}
 Experience Entries:
@@ -198,53 +297,61 @@ Skills & Technologies:
 {json.dumps(user.skills, indent=2) if user.skills else "Infer technical skills from projects and user input."}
 """
 
-        system_prompt = f"""You are an elite, world-class ATS Resume Writer and LaTeX Engineer.
-Your task is to take a master LaTeX resume template and populate it with the user's real profile information and project details extracted from their GitHub repositories.
+        system_prompt = f"""You are a LaTeX template filler. You receive a LaTeX resume template and user data. Your ONLY job is to replace the sample/placeholder data in the template with the user's real data. You must preserve the EXACT structure, macros, and formatting of the template.
 
-CRITICAL RULES & STRICT CONSTRAINTS:
-1. **ZERO HALLUCINATION POLICY**:
-   - Do NOT invent fake metrics, fake companies, fake dates, or unverified technical achievements.
-   - Use ONLY the provided User Details and extracted Repository Facts.
-   - For repositories without a README, use the extracted package manifests (e.g. package.json, pyproject.toml), commit messages, and entry files to construct accurate, factual 2-3 ATS action bullets per project.
+ABSOLUTE RULES:
+1. **PRESERVE TEMPLATE STRUCTURE EXACTLY**: Keep every \\documentclass, \\usepackage, \\newcommand, \\renewcommand, \\pagestyle, margin setting, and macro definition UNCHANGED. Only modify the content inside \\begin{{document}}...\\end{{document}}.
 
-2. **PAGE BUDGET ({target_pages} PAGE TARGET)**:
-   - The output must fit strictly on **{target_pages} PAGE(S)**.
-   - Keep bullet points concise, impact-oriented, and limited to 2-3 bullets per experience or project entry.
-   - Do not allow dangling 1-2 lines to spill over onto an extra page.
+2. **USE ONLY MACROS DEFINED IN THE TEMPLATE**: The template defines macros like \\resumeSubheading{{}}{{}}{{}}{{}} (4 args), \\resumeProjectHeading{{}}{{}} (2 args), \\resumeItem{{}}, \\resumeSubHeadingListStart, \\resumeSubHeadingListEnd, \\resumeItemListStart, \\resumeItemListEnd. Use ONLY these. NEVER invent new macros or use \\begin{{center}} for sections.
 
-3. **CONDITIONAL SECTION RENDERING**:
-   - Work Experience Provided = {has_experience}.
-   - IF Work Experience is FALSE (no experience provided): You MUST COMPLETELY REMOVE / OMIT the "Experience" or "Work Experience" section heading and its entire block from the LaTeX template. Do NOT leave an empty section header or empty itemize environments.
-   - IF Work Experience is TRUE: Populate the Experience section cleanly with the provided experience entries.
+3. **HEADER**: Replace the name, phone, email, linkedin, github in the header \\begin{{center}} block. Keep the exact same \\href and \\underline structure from the template.
 
-4. **LATEX COMPILATION SAFETY & PACKAGE CONFLICTS**:
-   - Return valid, raw compilable LaTeX code ONLY.
-   - DO NOT add duplicate \\usepackage{{fontawesome}} or \\usepackage{{fontawesome5}} if they already exist in the template.
-   - Retain documentclass, packages, custom commands, and environment definitions from the template.
-   - DO NOT surround your response in markdown code blocks like ```latex or ```. Return ONLY the raw LaTeX string starting with \\documentclass or comments.
-"""
+4. **SECTIONS**: For each section, follow the template's pattern exactly:
+   - Education: Use \\resumeSubheading{{Institution}}{{Location}}{{Degree}}{{Dates}} inside \\resumeSubHeadingListStart...\\resumeSubHeadingListEnd
+   - Experience: Use \\resumeSubheading{{Role}}{{Dates}}{{Company}}{{Location}} with \\resumeItemListStart...\\resumeItemListEnd containing \\resumeItem{{}} entries
+   - Projects: Use \\resumeProjectHeading{{\\textbf{{Name}} $|$ \\emph{{Tech}}}}{{Dates}} with \\resumeItemListStart...\\resumeItemListEnd containing \\resumeItem{{}} entries
+   - Technical Skills: Use the exact \\begin{{itemize}} pattern from the template with \\textbf{{Category}}{{: values}}
 
-        user_prompt = f"""Here is the Candidate's Profile:
+5. **CONDITIONAL SECTIONS**:
+   - Work Experience Provided = {has_experience}. If FALSE, DELETE the entire Experience section (\\section and its list block).
+   - Education Provided = {has_education}. If FALSE, DELETE the entire Education section.
+   - If user provided a Summary/Bio, add a \\section{{Summary}} with plain text underneath (NO \\begin{{center}}, just the text).
+   - If user provided Certifications, add a \\section{{Certifications}} with \\resumeSubHeadingListStart containing \\resumeSubheading entries.
+
+6. **HYPERLINKS IN PROJECTS**: For project GitHub links, use \\href{{URL}}{{\\underline{{GitHub}}}} where URL contains raw underscores (NOT \\_ or %5F). hyperref handles underscores in URLs.
+
+7. **NO EMPTY ENVIRONMENTS**: Never output \\resumeSubHeadingListStart...\\resumeSubHeadingListEnd without items. Never output \\resumeItemListStart...\\resumeItemListEnd without items. Delete empty sections entirely.
+
+8. **NO TRAILING BACKSLASHES**: Never put \\\\ after the last \\textbf{{}}{{:}} line in skills. Never put \\\\ after a \\resumeSubheading call.
+
+9. **PAGE BUDGET**: Fit on {target_pages} page(s). Use 2-3 concise bullet points per project/experience.
+
+10. **ZERO HALLUCINATION**: Use ONLY the provided user data. Do NOT invent metrics, companies, or dates.
+
+11. **OUTPUT FORMAT**: Return ONLY raw LaTeX starting with % or \\documentclass. NO markdown code blocks."""
+
+        user_prompt = f"""CANDIDATE DATA:
 {user_info_str}
 
-Here are the Inspected Selected GitHub Repositories:
+GITHUB REPOSITORIES:
 {repo_context_str}
 
-Here is the Base LaTeX Template code:
+TEMPLATE TO FILL (preserve structure exactly, only replace data):
 {template_tex}
 
-Inject the candidate's details and generated project bullets into the LaTeX template now. Enforce all rules, escape LaTeX special characters, and return ONLY the raw, complete, compilable LaTeX document string."""
+Fill in the template with the candidate's data now. Return the complete LaTeX document."""
 
         edited_tex = ""
 
-        # Try executing LLM using Groq or OpenAI API if available
         groq_api_key = os.getenv("GROQ_API_KEY")
         openai_api_key = os.getenv("OPENAI_API_KEY")
+
+        print(f"[LLM_BRAIN] Template size: {len(template_tex)} chars, Repos: {len(repos)}, Has exp: {has_experience}, Has edu: {has_education}")
         
         if groq_api_key:
             try:
                 from langchain_groq import ChatGroq
-                llm = ChatGroq(model_name="llama-3.3-70b-versatile", groq_api_key=groq_api_key, temperature=0.2)
+                llm = ChatGroq(model_name="llama-3.1-8b-instant", groq_api_key=groq_api_key, temperature=0.1)
                 res = llm.invoke([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
                 edited_tex = res.content
             except Exception as e:
@@ -262,10 +369,37 @@ Inject the candidate's details and generated project bullets into the LaTeX temp
         # Fallback / Direct Deterministic Injector if LLM API Key is missing or failed
         if not editedTex_has_value(edited_tex):
             print("[LLM_BRAIN] No LLM API response available — executing fallback template string replacement.")
-            edited_tex = fallback_latex_filler(template_tex, user, repos, has_experience)
+            edited_tex = fallback_latex_filler(template_tex, user, repos, has_experience, has_education)
 
         # Sanitize and post-process generated LaTeX code
         edited_tex = sanitize_generated_tex(edited_tex)
+
+        # CRITICAL: Force-replace preamble with original template preamble.
+        # The LLM often drops/modifies \newcommand definitions, causing
+        # "Undefined control sequence" errors. By using the original preamble,
+        # all macros (\resumeItemListEnd, \resumeSubheading, etc.) are guaranteed defined.
+        begin_doc_marker = r'\begin{document}'
+        orig_preamble_idx = template_tex.find(begin_doc_marker)
+        llm_body_idx = edited_tex.find(begin_doc_marker)
+        if orig_preamble_idx > 0 and llm_body_idx > 0:
+            original_preamble = template_tex[:orig_preamble_idx]  # everything before \begin{document}
+            llm_body = edited_tex[llm_body_idx:]  # \begin{document} ... \end{document}
+            edited_tex = original_preamble + llm_body
+            print("[LLM_BRAIN] Preamble replaced with original template preamble (macros guaranteed).")
+
+        lines = edited_tex.split('\n')
+        print(f"[LLM_BRAIN] Generated TeX: {len(lines)} total lines")
+        print(f"[LLM_BRAIN] First 5 lines:")
+        for i, l in enumerate(lines[:5], start=1):
+            print(f"  {i}: {l}")
+        has_docclass = r'\documentclass' in edited_tex
+        has_begindoc = r'\begin{document}' in edited_tex
+        has_enddoc = r'\end{document}' in edited_tex
+        print(f"[LLM_BRAIN] Has \\documentclass: {has_docclass}, Has \\begin{{document}}: {has_begindoc}, Has \\end{{document}}: {has_enddoc}")
+        print("[LLM_BRAIN] Generated TeX (Lines 110-160):")
+        for i, l in enumerate(lines[109:160], start=110):
+            print(f"{i}: {l}")
+        print("="*60)
 
         return {"ok": True, "tex": edited_tex, "summary": "Resume generated successfully with zero hallucination context."}
 
@@ -278,7 +412,7 @@ def editedTex_has_value(text: str) -> bool:
     return bool(text and r"\documentclass" in text)
 
 
-def fallback_latex_filler(tex: str, user: UserProfile, repos: List[RepoDetail], has_experience: bool) -> str:
+def fallback_latex_filler(tex: str, user: UserProfile, repos: List[RepoDetail], has_experience: bool, has_education: bool) -> str:
     """Fallback deterministic filler when no LLM API key is present."""
     result = tex
 
@@ -290,10 +424,14 @@ def fallback_latex_filler(tex: str, user: UserProfile, repos: List[RepoDetail], 
     result = re.sub(r"(\\name\{)[^}]*(\})", rf"\1{name}\2", result)
     result = re.sub(r"(\\href\{mailto:[^}]*\}\{)[^}]*(\})", rf"\1{email}\2", result)
 
-    # If experience is empty, comment out or remove experience section
+    # If experience is empty, remove experience section
     if not has_experience:
         result = re.sub(r"\\section\{Experience\}.*?(?=\\section|\n\\end\{document\})", "", result, flags=re.DOTALL | re.IGNORECASE)
         result = re.sub(r"\\section\{Work Experience\}.*?(?=\\section|\n\\end\{document\})", "", result, flags=re.DOTALL | re.IGNORECASE)
+
+    # If education is empty, remove education section
+    if not has_education:
+        result = re.sub(r"\\section\{Education\}.*?(?=\\section|\n\\end\{document\})", "", result, flags=re.DOTALL | re.IGNORECASE)
 
     return result
 
